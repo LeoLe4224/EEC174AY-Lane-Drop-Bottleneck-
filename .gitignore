@@ -1,0 +1,17 @@
+.venv/
+.idea/
+__pycache__/
+*.pyc
+
+input_videos/
+out_videos/
+runs/
+runs_highway/
+
+traffic_dataset/images/all/
+traffic_dataset/images/train/
+traffic_dataset/images/val/
+traffic_dataset/labels/train/
+traffic_dataset/labels/val/
+traffic_dataset/labels/*.cache
+
