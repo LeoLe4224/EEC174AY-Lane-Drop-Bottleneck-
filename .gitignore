@@ -2,11 +2,17 @@
 .idea/
 __pycache__/
 *.pyc
+a.out
 
 input_videos/
 out_videos/
 runs/
 runs_highway/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.7z
 
 traffic_dataset/images/all/
 traffic_dataset/images/train/
@@ -14,4 +20,3 @@ traffic_dataset/images/val/
 traffic_dataset/labels/train/
 traffic_dataset/labels/val/
 traffic_dataset/labels/*.cache
-

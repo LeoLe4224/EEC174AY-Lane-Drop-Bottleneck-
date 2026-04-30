@@ -1,39 +1,65 @@
+import argparse
 import sys
+
 import torch
 from ultralytics import YOLO
 
-# =========================================================
-# SETTINGS
-# =========================================================
 
-MODEL_START = "yolo11s.pt"
-DATA_YAML = "traffic_dataset/data.yaml"
-EPOCHS = 100
-IMG_SIZE = 1280
-BATCH = 4
-PROJECT_NAME = "."
-RUN_NAME = "runs_highway/car_detector_ft"
-DEVICE = 0
+DEFAULT_MODEL = "yolo11s.pt"
+DEFAULT_DATA = "configs/visdrone.yaml"
+DEFAULT_EPOCHS = 100
+DEFAULT_IMG_SIZE = 1280
+DEFAULT_BATCH = 4
+DEFAULT_PROJECT = "."
+DEFAULT_RUN_NAME = "runs_highway/visdrone_ft"
+DEFAULT_DEVICE = "0"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train a YOLO model on a local dataset such as VisDrone."
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Starting weights file.")
+    parser.add_argument("--data", default=DEFAULT_DATA, help="Dataset YAML path.")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Epoch count.")
+    parser.add_argument("--imgsz", type=int, default=DEFAULT_IMG_SIZE, help="Training image size.")
+    parser.add_argument("--batch", type=int, default=DEFAULT_BATCH, help="Batch size.")
+    parser.add_argument("--project", default=DEFAULT_PROJECT, help="Ultralytics project output path.")
+    parser.add_argument("--name", default=DEFAULT_RUN_NAME, help="Ultralytics run name.")
+    parser.add_argument(
+        "--device",
+        default=DEFAULT_DEVICE,
+        help='CUDA device like "0". Use "cpu" to allow CPU training.',
+    )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Allow training on CPU when CUDA is unavailable.",
+    )
+    return parser.parse_args()
 
 
 def main():
-    if not torch.cuda.is_available():
+    args = parse_args()
+    wants_cpu = str(args.device).lower() == "cpu"
+
+    if not wants_cpu and not torch.cuda.is_available() and not args.allow_cpu:
         print("CUDA GPU not available in this Python environment.")
-        print("Training is blocked because CPU fallback is disabled.")
-        print("Install a CUDA-enabled PyTorch build and run this script from that interpreter.")
+        print("Training is blocked because CPU fallback is disabled by default.")
+        print('Install a CUDA-enabled PyTorch build, pass --device cpu, or add --allow-cpu.')
         sys.exit(1)
 
-    model = YOLO(MODEL_START)
+    model = YOLO(args.model)
 
     model.train(
-        data=DATA_YAML,
-        epochs=EPOCHS,
-        imgsz=IMG_SIZE,
-        batch=BATCH,
-        device=DEVICE,
+        data=args.data,
+        epochs=args.epochs,
+        imgsz=args.imgsz,
+        batch=args.batch,
+        device=args.device,
         pretrained=True,
-        project=PROJECT_NAME,
-        name=RUN_NAME,
+        project=args.project,
+        name=args.name,
         exist_ok=True,
     )
 
