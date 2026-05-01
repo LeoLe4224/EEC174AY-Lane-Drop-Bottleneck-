@@ -3,6 +3,7 @@ import cv2
 import time
 import csv
 import tempfile
+import statistics
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from ultralytics import YOLO
@@ -28,8 +29,10 @@ SHOW_VIDEO = False
 
 SCREEN_WIDTH_FEET = 500.0
 SPEED_ESTIMATE_FRAME_GAP = 4
-MIN_CENTROID_TRAVEL_PIXELS = 4.0
-SPEED_SMOOTHING_ALPHA = 0.35
+SPEED_ESTIMATE_HISTORY_POINTS = 6
+RAW_SPEED_HISTORY_SIZE = 5
+MIN_CENTROID_TRAVEL_PIXELS = 8.0
+SPEED_SMOOTHING_ALPHA = 0.2
 EDGE_MARGIN_PIXELS = 3
 ACCELERATION_THRESHOLD_MPH_PER_10_FRAMES = 2.0
 MAX_COLOR_RATE_MPH_PER_10_FRAMES = 6.0
@@ -298,9 +301,9 @@ def estimate_speed_mph(track_history, fps, feet_per_pixel):
     if delta_frames <= 0:
         return None
 
-    delta_x = end_center[0] - start_center[0]
-    delta_y = end_center[1] - start_center[1]
-    delta_pixels = (delta_x ** 2 + delta_y ** 2) ** 0.5
+    # Cars in this view move predominantly left/right, so horizontal centroid
+    # motion is more stable than full 2D box jitter.
+    delta_pixels = abs(end_center[0] - start_center[0])
     if delta_pixels < MIN_CENTROID_TRAVEL_PIXELS:
         return None
 
@@ -308,6 +311,20 @@ def estimate_speed_mph(track_history, fps, feet_per_pixel):
     delta_seconds = delta_frames / fps
     feet_per_second = delta_feet / delta_seconds
     return feet_per_second * 3600.0 / 5280.0
+
+
+def smooth_speed_mph(raw_speed_history, previous_speed_mph):
+    if not raw_speed_history:
+        return None
+
+    median_speed_mph = statistics.median(raw_speed_history)
+    if previous_speed_mph is None:
+        return median_speed_mph
+
+    return (
+        SPEED_SMOOTHING_ALPHA * median_speed_mph
+        + (1.0 - SPEED_SMOOTHING_ALPHA) * previous_speed_mph
+    )
 
 
 def get_track_color(current_speed_mph, previous_speed_mph, current_frame, previous_frame):
@@ -438,11 +455,12 @@ def process_video(model, video_path):
         return
 
     seen_ids = set()
-    track_histories = defaultdict(lambda: deque(maxlen=2))
+    track_histories = defaultdict(lambda: deque(maxlen=SPEED_ESTIMATE_HISTORY_POINTS))
     track_speeds_mph = {}
     previous_track_speeds_mph = {}
     previous_speed_sample_frames = {}
     current_speed_sample_frames = {}
+    raw_speed_histories = defaultdict(lambda: deque(maxlen=RAW_SPEED_HISTORY_SIZE))
     track_speed_samples = defaultdict(list)
     track_stats = defaultdict(initialize_track_stats)
     frame_num = 0
@@ -535,20 +553,18 @@ def process_video(model, video_path):
                             if not history or frame_num - history[-1][0] >= SPEED_ESTIMATE_FRAME_GAP:
                                 history.append((frame_num, (center_x, center_y)))
 
-                            sampled_speed_mph = estimate_speed_mph(
+                            raw_speed_mph = estimate_speed_mph(
                                 history,
                                 fps,
                                 feet_per_pixel
                             )
 
-                            if sampled_speed_mph is not None:
-                                if previous_speed_mph is None:
-                                    speed_mph = sampled_speed_mph
-                                else:
-                                    speed_mph = (
-                                        SPEED_SMOOTHING_ALPHA * sampled_speed_mph
-                                        + (1.0 - SPEED_SMOOTHING_ALPHA) * previous_speed_mph
-                                    )
+                            if raw_speed_mph is not None:
+                                raw_speed_histories[track_id].append(raw_speed_mph)
+                                speed_mph = smooth_speed_mph(
+                                    raw_speed_histories[track_id],
+                                    previous_speed_mph,
+                                )
 
                         if speed_mph is not None:
                             track_speeds_mph[track_id] = speed_mph
