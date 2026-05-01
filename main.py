@@ -25,10 +25,11 @@ LINE_WIDTH = 2
 SHOW_VIDEO = False
 
 SCREEN_WIDTH_FEET = 500.0
-SPEED_WINDOW_FRAMES = 8
-MIN_SPEED_SAMPLE_FRAMES = 3
-MIN_HORIZONTAL_TRAVEL_PIXELS = 5.0
-SPEED_CHANGE_THRESHOLD_MPH = 0.5
+SPEED_ESTIMATE_FRAME_GAP = 4
+MIN_CENTROID_TRAVEL_PIXELS = 4.0
+SPEED_SMOOTHING_ALPHA = 0.35
+EDGE_MARGIN_PIXELS = 3
+MAX_COLOR_SPEED_DELTA_MPH = 3.0
 REPORT_FLUSH_EVERY_FRAMES = 30
 
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".MP4", ".MOV", ".AVI", ".MKV")
@@ -172,6 +173,14 @@ def initialize_track_stats():
     }
 
 
+def interpolate_bgr(color_a, color_b, ratio):
+    ratio = min(max(ratio, 0.0), 1.0)
+    return tuple(
+        int(round(channel_a + (channel_b - channel_a) * ratio))
+        for channel_a, channel_b in zip(color_a, color_b)
+    )
+
+
 def write_car_metrics_csv(csv_path, video_path, fps, frame_count, lane_boxes, track_stats):
     lane_numbers = [lane["lane_number"] for lane in lane_boxes]
     fieldnames = [
@@ -214,19 +223,31 @@ def write_car_metrics_csv(csv_path, video_path, fps, frame_count, lane_boxes, tr
             writer.writerow(row)
 
 
+def is_box_near_frame_edge(box_xyxy, frame_width, frame_height, margin_pixels):
+    x1, y1, x2, y2 = box_xyxy
+    return (
+        x1 <= margin_pixels
+        or y1 <= margin_pixels
+        or x2 >= frame_width - margin_pixels
+        or y2 >= frame_height - margin_pixels
+    )
+
+
 def estimate_speed_mph(track_history, fps, feet_per_pixel):
-    if len(track_history) < MIN_SPEED_SAMPLE_FRAMES or fps <= 0:
+    if len(track_history) < 2 or fps <= 0:
         return None
 
-    start_frame, start_x = track_history[0]
-    end_frame, end_x = track_history[-1]
+    start_frame, start_center = track_history[0]
+    end_frame, end_center = track_history[-1]
     delta_frames = end_frame - start_frame
 
     if delta_frames <= 0:
         return None
 
-    delta_pixels = abs(end_x - start_x)
-    if delta_pixels < MIN_HORIZONTAL_TRAVEL_PIXELS:
+    delta_x = end_center[0] - start_center[0]
+    delta_y = end_center[1] - start_center[1]
+    delta_pixels = (delta_x ** 2 + delta_y ** 2) ** 0.5
+    if delta_pixels < MIN_CENTROID_TRAVEL_PIXELS:
         return None
 
     delta_feet = delta_pixels * feet_per_pixel
@@ -240,11 +261,13 @@ def get_track_color(current_speed_mph, previous_speed_mph):
         return (0, 255, 255)
 
     speed_delta = current_speed_mph - previous_speed_mph
-    if speed_delta > SPEED_CHANGE_THRESHOLD_MPH:
-        return (0, 255, 0)
-    if speed_delta < -SPEED_CHANGE_THRESHOLD_MPH:
-        return (0, 0, 255)
-    return (0, 255, 255)
+
+    if speed_delta >= 0:
+        ratio = min(speed_delta / MAX_COLOR_SPEED_DELTA_MPH, 1.0)
+        return interpolate_bgr((0, 255, 255), (0, 255, 0), ratio)
+
+    ratio = min(abs(speed_delta) / MAX_COLOR_SPEED_DELTA_MPH, 1.0)
+    return interpolate_bgr((0, 255, 255), (0, 0, 255), ratio)
 
 
 def draw_overlay(frame, frame_num, frame_time, raw_dets, active_tracks, total_unique, avg_speed_mph):
@@ -341,7 +364,7 @@ def process_video(model, video_path):
         return
 
     seen_ids = set()
-    track_histories = defaultdict(lambda: deque(maxlen=SPEED_WINDOW_FRAMES))
+    track_histories = defaultdict(lambda: deque(maxlen=2))
     track_speeds_mph = {}
     previous_track_speeds_mph = {}
     track_speed_samples = defaultdict(list)
@@ -404,7 +427,7 @@ def process_video(model, video_path):
                         seen_ids.add(track_id)
 
                         center_x = (x1 + x2) / 2.0
-                        track_histories[track_id].append((frame_num, center_x))
+                        center_y = (y1 + y2) / 2.0
 
                         current_time_s = frame_num / fps
                         stats = track_stats[track_id]
@@ -422,15 +445,38 @@ def process_video(model, video_path):
                         if majority_lane is not None:
                             stats["lane_frames"][majority_lane] += 1
 
-                        speed_mph = estimate_speed_mph(
-                            track_histories[track_id],
-                            fps,
-                            feet_per_pixel
-                        )
+                        speed_mph = None
                         previous_speed_mph = track_speeds_mph.get(track_id)
+                        box_near_edge = is_box_near_frame_edge(
+                            (x1, y1, x2, y2),
+                            w,
+                            h,
+                            EDGE_MARGIN_PIXELS,
+                        )
+
+                        if not box_near_edge:
+                            history = track_histories[track_id]
+                            if not history or frame_num - history[-1][0] >= SPEED_ESTIMATE_FRAME_GAP:
+                                history.append((frame_num, (center_x, center_y)))
+
+                            sampled_speed_mph = estimate_speed_mph(
+                                history,
+                                fps,
+                                feet_per_pixel
+                            )
+
+                            if sampled_speed_mph is not None:
+                                if previous_speed_mph is None:
+                                    speed_mph = sampled_speed_mph
+                                else:
+                                    speed_mph = (
+                                        SPEED_SMOOTHING_ALPHA * sampled_speed_mph
+                                        + (1.0 - SPEED_SMOOTHING_ALPHA) * previous_speed_mph
+                                    )
+
                         if speed_mph is not None:
                             track_speeds_mph[track_id] = speed_mph
-                            previous_track_speeds_mph[track_id] = previous_speed_mph
+                            previous_track_speeds_mph[track_id] = previous_speed_mph if previous_speed_mph is not None else speed_mph
                             track_speed_samples[track_id].append({
                                 "frame": frame_num,
                                 "video_time_s": current_time_s,
