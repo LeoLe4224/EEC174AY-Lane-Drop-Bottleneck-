@@ -204,11 +204,11 @@ def build_metrics_rows(fps, lane_boxes, track_stats):
         stats = track_stats[track_id]
         first_frame = stats["first_frame"]
         last_frame = stats["last_frame"]
+        speeds = stats["speed_samples_mph"]
 
-        if first_frame is None or last_frame is None:
+        if first_frame is None or last_frame is None or not speeds:
             continue
 
-        speeds = stats["speed_samples_mph"]
         row = {
             "tracker_id": track_id,
             "initial_speed_mph": f"{speeds[0]:.4f}" if speeds else "",
