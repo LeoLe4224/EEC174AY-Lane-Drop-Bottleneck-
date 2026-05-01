@@ -2,6 +2,7 @@ import os
 import cv2
 import time
 import csv
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from ultralytics import YOLO
@@ -181,7 +182,7 @@ def interpolate_bgr(color_a, color_b, ratio):
     )
 
 
-def write_car_metrics_csv(csv_path, video_path, fps, frame_count, lane_boxes, track_stats):
+def build_metrics_rows(fps, lane_boxes, track_stats):
     lane_numbers = [lane["lane_number"] for lane in lane_boxes]
     fieldnames = [
         "tracker_id",
@@ -193,34 +194,85 @@ def write_car_metrics_csv(csv_path, video_path, fps, frame_count, lane_boxes, tr
         "final_time_s",
     ] + [f"lane_{lane_number}_time_s" for lane_number in lane_numbers]
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        writer.writeheader()
+    rows = []
+    for track_id in sorted(track_stats):
+        stats = track_stats[track_id]
+        first_frame = stats["first_frame"]
+        last_frame = stats["last_frame"]
 
-        for track_id in sorted(track_stats):
-            stats = track_stats[track_id]
-            first_frame = stats["first_frame"]
-            last_frame = stats["last_frame"]
+        if first_frame is None or last_frame is None:
+            continue
 
-            if first_frame is None or last_frame is None:
-                continue
+        speeds = stats["speed_samples_mph"]
+        row = {
+            "tracker_id": track_id,
+            "initial_speed_mph": f"{speeds[0]:.4f}" if speeds else "",
+            "final_speed_mph": f"{speeds[-1]:.4f}" if speeds else "",
+            "avg_speed_mph": f"{(sum(speeds) / len(speeds)):.4f}" if speeds else "",
+            "start_time_s": f"{stats['first_time_s']:.4f}",
+            "time_in_frame_s": f"{(stats['active_frame_count'] / fps):.4f}",
+            "final_time_s": f"{stats['last_time_s']:.4f}",
+        }
 
-            speeds = stats["speed_samples_mph"]
-            row = {
-                "tracker_id": track_id,
-                "initial_speed_mph": f"{speeds[0]:.4f}" if speeds else "",
-                "final_speed_mph": f"{speeds[-1]:.4f}" if speeds else "",
-                "avg_speed_mph": f"{(sum(speeds) / len(speeds)):.4f}" if speeds else "",
-                "start_time_s": f"{stats['first_time_s']:.4f}",
-                "time_in_frame_s": f"{(stats['active_frame_count'] / fps):.4f}",
-                "final_time_s": f"{stats['last_time_s']:.4f}",
-            }
+        for lane_number in lane_numbers:
+            lane_frame_count = stats["lane_frames"].get(lane_number, 0)
+            row[f"lane_{lane_number}_time_s"] = f"{(lane_frame_count / fps):.4f}"
 
-            for lane_number in lane_numbers:
-                lane_frame_count = stats["lane_frames"].get(lane_number, 0)
-                row[f"lane_{lane_number}_time_s"] = f"{(lane_frame_count / fps):.4f}"
+        rows.append(row)
 
-            writer.writerow(row)
+    return fieldnames, rows
+
+
+def make_locked_fallback_path(csv_path):
+    folder = os.path.dirname(csv_path)
+    stem, ext = os.path.splitext(os.path.basename(csv_path))
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    candidate = os.path.join(folder, f"{stem}_live_{timestamp}{ext}")
+    suffix = 1
+
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, f"{stem}_live_{timestamp}_{suffix}{ext}")
+        suffix += 1
+
+    return candidate
+
+
+def write_csv_atomic(csv_path, fieldnames, rows):
+    folder = os.path.dirname(csv_path) or "."
+    os.makedirs(folder, exist_ok=True)
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            delete=False,
+            dir=folder,
+            prefix="tmp_metrics_",
+            suffix=".csv",
+        ) as temp_file:
+            temp_path = temp_file.name
+            writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        os.replace(temp_path, csv_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def write_car_metrics_csv(csv_path, fps, lane_boxes, track_stats):
+    fieldnames, rows = build_metrics_rows(fps, lane_boxes, track_stats)
+
+    try:
+        write_csv_atomic(csv_path, fieldnames, rows)
+        return csv_path, False
+    except PermissionError:
+        fallback_path = make_locked_fallback_path(csv_path)
+        write_csv_atomic(fallback_path, fieldnames, rows)
+        return fallback_path, True
 
 
 def is_box_near_frame_edge(box_xyxy, frame_width, frame_height, margin_pixels):
@@ -350,6 +402,7 @@ def process_video(model, video_path):
     speed_report_path = make_speed_report_path(video_path)
     metrics_csv_path = make_metrics_csv_path(video_path)
     lane_boxes = load_lane_boxes(LANE_ANNOTATION_XML)
+    metrics_path_was_redirected = False
 
     out_writer = cv2.VideoWriter(
         out_path,
@@ -541,7 +594,17 @@ def process_video(model, video_path):
 
             if frame_num == 1 or frame_num % REPORT_FLUSH_EVERY_FRAMES == 0:
                 write_speed_report(speed_report_path, video_path, fps, frame_num, track_speed_samples)
-                write_car_metrics_csv(metrics_csv_path, video_path, fps, frame_num, lane_boxes, track_stats)
+                metrics_csv_path, metrics_path_was_redirected = write_car_metrics_csv(
+                    metrics_csv_path,
+                    fps,
+                    lane_boxes,
+                    track_stats,
+                )
+                if metrics_path_was_redirected and frame_num == 1:
+                    print(
+                        f"Metrics CSV target was locked. Writing to fallback path: {metrics_csv_path}",
+                        flush=True,
+                    )
 
             if SHOW_VIDEO:
                 cv2.imshow("Tracking", plotted)
@@ -556,7 +619,12 @@ def process_video(model, video_path):
         cap.release()
         out_writer.release()
         write_speed_report(speed_report_path, video_path, fps, frame_num, track_speed_samples)
-        write_car_metrics_csv(metrics_csv_path, video_path, fps, frame_num, lane_boxes, track_stats)
+        metrics_csv_path, metrics_path_was_redirected = write_car_metrics_csv(
+            metrics_csv_path,
+            fps,
+            lane_boxes,
+            track_stats,
+        )
 
     avg_time = total_time / frame_num if frame_num > 0 else 0.0
 
