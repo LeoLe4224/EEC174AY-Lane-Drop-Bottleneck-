@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<annotations>
+  <version>1.1</version>
+  <meta>
+    <job>
+      <id>3937009</id>
+      <size>1</size>
+      <mode>annotation</mode>
+      <overlap>0</overlap>
+      <created>2026-05-01 00:11:34.010025+00:00</created>
+      <updated>2026-05-01 00:14:39.829718+00:00</updated>
+      <subset>default</subset>
+      <start_frame>0</start_frame>
+      <stop_frame>0</stop_frame>
+      <labels>
+        <label>
+          <name>Lane 1</name>
+          <type>any</type>
+        </label>
+        <label>
+          <name>Lane 2</name>
+          <type>any</type>
+        </label>
+        <label>
+          <name>Lane 3</name>
+          <type>any</type>
+        </label>
+        <label>
+          <name>Lane 4</name>
+          <type>any</type>
+        </label>
+      </labels>
+    </job>
+  </meta>
+  <image id="0" name="1338.MP4_frame_00000.jpg" width="1920" height="1080">
+    <box label="Lane 1" source="manual" occluded="0" xtl="0.00" ytl="423.27" xbr="1920.00" ybr="479.61" z_order="0">
+    </box>
+    <box label="Lane 2" source="manual" occluded="0" xtl="0.00" ytl="479.61" xbr="1920.00" ybr="530.44" z_order="0">
+    </box>
+    <box label="Lane 3" source="manual" occluded="0" xtl="0.00" ytl="530.44" xbr="1920.00" ybr="575.10" z_order="0">
+    </box>
+    <box label="Lane 4" source="manual" occluded="0" xtl="0.00" ytl="575.10" xbr="1920.00" ybr="621.13" z_order="0">
+    </box>
+  </image>
+</annotations>

@@ -1,6 +1,8 @@
 import os
 import cv2
 import time
+import csv
+import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from ultralytics import YOLO
 
@@ -10,6 +12,7 @@ from ultralytics import YOLO
 
 INPUT_FOLDER = "input_videos"
 OUTPUT_FOLDER = "out_videos"
+LANE_ANNOTATION_XML = "configs/bound_box_lanes.xml"
 
 MODEL_WEIGHTS = "runs/detect/runs_highway/car_detector_ft/weights/best.pt"
 # custom model has one class only: car
@@ -60,6 +63,155 @@ def make_speed_report_path(video_path):
     base = os.path.basename(video_path)
     stem, _ = os.path.splitext(base)
     return os.path.join(OUTPUT_FOLDER, f"{stem}_speeds.txt")
+
+
+def make_metrics_csv_path(video_path):
+    base = os.path.basename(video_path)
+    stem, _ = os.path.splitext(base)
+    return os.path.join(OUTPUT_FOLDER, f"{stem}_car_metrics.csv")
+
+
+def parse_lane_number(label):
+    parts = label.strip().split()
+    if len(parts) != 2 or parts[0].lower() != "lane":
+        raise ValueError(f"Unsupported lane label: {label}")
+    return int(parts[1])
+
+
+def load_lane_boxes(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    image = root.find("image")
+    if image is None:
+        raise RuntimeError(f"No <image> section found in {xml_path}")
+
+    lane_boxes = []
+    for box in image.findall("box"):
+        label = box.attrib["label"]
+        lane_boxes.append({
+            "lane_number": parse_lane_number(label),
+            "label": label,
+            "xtl": float(box.attrib["xtl"]),
+            "ytl": float(box.attrib["ytl"]),
+            "xbr": float(box.attrib["xbr"]),
+            "ybr": float(box.attrib["ybr"]),
+        })
+
+    if not lane_boxes:
+        raise RuntimeError(f"No lane boxes found in {xml_path}")
+
+    lane_boxes.sort(key=lambda lane: lane["lane_number"])
+    for index, lane in enumerate(lane_boxes, start=1):
+        if lane["lane_number"] != index:
+            raise RuntimeError("Lane numbers must be consecutive starting at 1.")
+
+    return lane_boxes
+
+
+def intersect_area(box_a, box_b):
+    left = max(box_a[0], box_b[0])
+    top = max(box_a[1], box_b[1])
+    right = min(box_a[2], box_b[2])
+    bottom = min(box_a[3], box_b[3])
+
+    if right <= left or bottom <= top:
+        return 0.0
+
+    return (right - left) * (bottom - top)
+
+
+def get_majority_lane(box_xyxy, lane_boxes):
+    x1, y1, x2, y2 = box_xyxy
+    box_area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+    if box_area <= 0:
+        return None
+
+    best_lane = None
+    best_area = 0.0
+
+    for lane in lane_boxes:
+        lane_rect = (lane["xtl"], lane["ytl"], lane["xbr"], lane["ybr"])
+        overlap_area = intersect_area((x1, y1, x2, y2), lane_rect)
+        if overlap_area > best_area:
+            best_area = overlap_area
+            best_lane = lane["lane_number"]
+
+    if best_area > box_area / 2.0:
+        return best_lane
+
+    return None
+
+
+def draw_lane_overlay(frame, lane_boxes):
+    for lane in lane_boxes:
+        x1 = int(round(lane["xtl"]))
+        y1 = int(round(lane["ytl"]))
+        x2 = int(round(lane["xbr"]))
+        y2 = int(round(lane["ybr"]))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.putText(
+            frame,
+            lane["label"],
+            (x1 + 10, max(y1 - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2,
+        )
+
+
+def initialize_track_stats():
+    return {
+        "first_frame": None,
+        "last_frame": None,
+        "first_time_s": None,
+        "last_time_s": None,
+        "active_frame_count": 0,
+        "speed_samples_mph": [],
+        "lane_frames": defaultdict(int),
+    }
+
+
+def write_car_metrics_csv(csv_path, video_path, fps, frame_count, lane_boxes, track_stats):
+    lane_numbers = [lane["lane_number"] for lane in lane_boxes]
+    fieldnames = [
+        "tracker_id",
+        "initial_speed_mph",
+        "final_speed_mph",
+        "avg_speed_mph",
+        "start_time_s",
+        "time_in_frame_s",
+        "final_time_s",
+    ] + [f"lane_{lane_number}_time_s" for lane_number in lane_numbers]
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for track_id in sorted(track_stats):
+            stats = track_stats[track_id]
+            first_frame = stats["first_frame"]
+            last_frame = stats["last_frame"]
+
+            if first_frame is None or last_frame is None:
+                continue
+
+            speeds = stats["speed_samples_mph"]
+            row = {
+                "tracker_id": track_id,
+                "initial_speed_mph": f"{speeds[0]:.4f}" if speeds else "",
+                "final_speed_mph": f"{speeds[-1]:.4f}" if speeds else "",
+                "avg_speed_mph": f"{(sum(speeds) / len(speeds)):.4f}" if speeds else "",
+                "start_time_s": f"{stats['first_time_s']:.4f}",
+                "time_in_frame_s": f"{(stats['active_frame_count'] / fps):.4f}",
+                "final_time_s": f"{stats['last_time_s']:.4f}",
+            }
+
+            for lane_number in lane_numbers:
+                lane_frame_count = stats["lane_frames"].get(lane_number, 0)
+                row[f"lane_{lane_number}_time_s"] = f"{(lane_frame_count / fps):.4f}"
+
+            writer.writerow(row)
 
 
 def estimate_speed_mph(track_history, fps, feet_per_pixel):
@@ -173,6 +325,8 @@ def process_video(model, video_path):
 
     out_path = make_output_path(video_path)
     speed_report_path = make_speed_report_path(video_path)
+    metrics_csv_path = make_metrics_csv_path(video_path)
+    lane_boxes = load_lane_boxes(LANE_ANNOTATION_XML)
 
     out_writer = cv2.VideoWriter(
         out_path,
@@ -191,6 +345,7 @@ def process_video(model, video_path):
     track_speeds_mph = {}
     previous_track_speeds_mph = {}
     track_speed_samples = defaultdict(list)
+    track_stats = defaultdict(initialize_track_stats)
     frame_num = 0
     total_time = 0.0
     stop_requested = False
@@ -218,6 +373,7 @@ def process_video(model, video_path):
 
             result = results[0]
             plotted = frame.copy()
+            draw_lane_overlay(plotted, lane_boxes)
 
             raw_dets = 0
             active_tracks = 0
@@ -250,6 +406,22 @@ def process_video(model, video_path):
                         center_x = (x1 + x2) / 2.0
                         track_histories[track_id].append((frame_num, center_x))
 
+                        current_time_s = frame_num / fps
+                        stats = track_stats[track_id]
+                        if stats["first_frame"] is None:
+                            stats["first_frame"] = frame_num
+                            stats["first_time_s"] = (frame_num - 1) / fps
+                        stats["last_frame"] = frame_num
+                        stats["last_time_s"] = current_time_s
+                        stats["active_frame_count"] += 1
+
+                        majority_lane = get_majority_lane(
+                            (float(x1), float(y1), float(x2), float(y2)),
+                            lane_boxes,
+                        )
+                        if majority_lane is not None:
+                            stats["lane_frames"][majority_lane] += 1
+
                         speed_mph = estimate_speed_mph(
                             track_histories[track_id],
                             fps,
@@ -261,9 +433,10 @@ def process_video(model, video_path):
                             previous_track_speeds_mph[track_id] = previous_speed_mph
                             track_speed_samples[track_id].append({
                                 "frame": frame_num,
-                                "video_time_s": frame_num / fps,
+                                "video_time_s": current_time_s,
                                 "speed_mph": speed_mph,
                             })
+                            stats["speed_samples_mph"].append(speed_mph)
 
                         speed_mph = track_speeds_mph.get(track_id)
                         previous_speed_mph = previous_track_speeds_mph.get(track_id)
@@ -272,6 +445,9 @@ def process_video(model, video_path):
                             label = f"ID {track_id} | {speed_mph:.1f} mph"
                         else:
                             label = f"ID {track_id} | car {conf:.2f}"
+
+                        if majority_lane is not None:
+                            label += f" | Lane {majority_lane}"
                         color = get_track_color(speed_mph, previous_speed_mph)
                     else:
                         label = f"car {conf:.2f}"
@@ -319,6 +495,7 @@ def process_video(model, video_path):
 
             if frame_num == 1 or frame_num % REPORT_FLUSH_EVERY_FRAMES == 0:
                 write_speed_report(speed_report_path, video_path, fps, frame_num, track_speed_samples)
+                write_car_metrics_csv(metrics_csv_path, video_path, fps, frame_num, lane_boxes, track_stats)
 
             if SHOW_VIDEO:
                 cv2.imshow("Tracking", plotted)
@@ -333,6 +510,7 @@ def process_video(model, video_path):
         cap.release()
         out_writer.release()
         write_speed_report(speed_report_path, video_path, fps, frame_num, track_speed_samples)
+        write_car_metrics_csv(metrics_csv_path, video_path, fps, frame_num, lane_boxes, track_stats)
 
     avg_time = total_time / frame_num if frame_num > 0 else 0.0
 
@@ -342,7 +520,8 @@ def process_video(model, video_path):
     print(f"Avg frame time: {avg_time:.6f} s")
     print(f"Total vehicles: {len(seen_ids)}")
     print(f"Saved to: {out_path}\n")
-    print(f"Speed report: {speed_report_path}\n")
+    print(f"Speed report: {speed_report_path}")
+    print(f"Car metrics CSV: {metrics_csv_path}\n")
     return not stop_requested
 
 
@@ -353,6 +532,10 @@ def main():
 
     if not os.path.isfile(MODEL_WEIGHTS):
         print(f"Missing model weights: {MODEL_WEIGHTS}")
+        return
+
+    if not os.path.isfile(LANE_ANNOTATION_XML):
+        print(f"Missing lane annotation file: {LANE_ANNOTATION_XML}")
         return
 
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
