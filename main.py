@@ -22,6 +22,7 @@ VEHICLE_CLASSES = [0]
 CONF_THRESH = 0.03
 IMG_SIZE = 1920
 LINE_WIDTH = 2
+LANE_LINE_WIDTH = 1
 
 SHOW_VIDEO = False
 
@@ -30,7 +31,8 @@ SPEED_ESTIMATE_FRAME_GAP = 4
 MIN_CENTROID_TRAVEL_PIXELS = 4.0
 SPEED_SMOOTHING_ALPHA = 0.35
 EDGE_MARGIN_PIXELS = 3
-MAX_COLOR_SPEED_DELTA_MPH = 3.0
+ACCELERATION_THRESHOLD_MPH_PER_10_FRAMES = 2.0
+MAX_COLOR_RATE_MPH_PER_10_FRAMES = 6.0
 REPORT_FLUSH_EVERY_FRAMES = 30
 
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".MP4", ".MOV", ".AVI", ".MKV")
@@ -150,7 +152,7 @@ def draw_lane_overlay(frame, lane_boxes):
         y1 = int(round(lane["ytl"]))
         x2 = int(round(lane["xbr"]))
         y2 = int(round(lane["ybr"]))
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), LANE_LINE_WIDTH)
         cv2.putText(
             frame,
             lane["label"],
@@ -308,17 +310,36 @@ def estimate_speed_mph(track_history, fps, feet_per_pixel):
     return feet_per_second * 3600.0 / 5280.0
 
 
-def get_track_color(current_speed_mph, previous_speed_mph):
+def get_track_color(current_speed_mph, previous_speed_mph, current_frame, previous_frame):
     if current_speed_mph is None or previous_speed_mph is None:
         return (0, 255, 255)
 
-    speed_delta = current_speed_mph - previous_speed_mph
+    if current_frame is None or previous_frame is None:
+        return (0, 255, 255)
 
-    if speed_delta >= 0:
-        ratio = min(speed_delta / MAX_COLOR_SPEED_DELTA_MPH, 1.0)
+    delta_frames = current_frame - previous_frame
+    if delta_frames <= 0:
+        return (0, 255, 255)
+
+    speed_delta = current_speed_mph - previous_speed_mph
+    rate_per_10_frames = speed_delta * 10.0 / delta_frames
+    abs_rate = abs(rate_per_10_frames)
+
+    if abs_rate <= ACCELERATION_THRESHOLD_MPH_PER_10_FRAMES:
+        return (0, 255, 255)
+
+    blend_span = max(
+        MAX_COLOR_RATE_MPH_PER_10_FRAMES - ACCELERATION_THRESHOLD_MPH_PER_10_FRAMES,
+        1e-6,
+    )
+    ratio = min(
+        (abs_rate - ACCELERATION_THRESHOLD_MPH_PER_10_FRAMES) / blend_span,
+        1.0,
+    )
+
+    if rate_per_10_frames > 0:
         return interpolate_bgr((0, 255, 255), (0, 255, 0), ratio)
 
-    ratio = min(abs(speed_delta) / MAX_COLOR_SPEED_DELTA_MPH, 1.0)
     return interpolate_bgr((0, 255, 255), (0, 0, 255), ratio)
 
 
@@ -420,6 +441,8 @@ def process_video(model, video_path):
     track_histories = defaultdict(lambda: deque(maxlen=2))
     track_speeds_mph = {}
     previous_track_speeds_mph = {}
+    previous_speed_sample_frames = {}
+    current_speed_sample_frames = {}
     track_speed_samples = defaultdict(list)
     track_stats = defaultdict(initialize_track_stats)
     frame_num = 0
@@ -530,6 +553,8 @@ def process_video(model, video_path):
                         if speed_mph is not None:
                             track_speeds_mph[track_id] = speed_mph
                             previous_track_speeds_mph[track_id] = previous_speed_mph if previous_speed_mph is not None else speed_mph
+                            previous_speed_sample_frames[track_id] = track_speed_samples[track_id][-1]["frame"] if track_speed_samples[track_id] else frame_num
+                            current_speed_sample_frames[track_id] = frame_num
                             track_speed_samples[track_id].append({
                                 "frame": frame_num,
                                 "video_time_s": current_time_s,
@@ -547,7 +572,12 @@ def process_video(model, video_path):
 
                         if majority_lane is not None:
                             label += f" | Lane {majority_lane}"
-                        color = get_track_color(speed_mph, previous_speed_mph)
+                        color = get_track_color(
+                            speed_mph,
+                            previous_speed_mph,
+                            current_speed_sample_frames.get(track_id),
+                            previous_speed_sample_frames.get(track_id),
+                        )
                     else:
                         label = f"car {conf:.2f}"
                         color = (0, 165, 255)
