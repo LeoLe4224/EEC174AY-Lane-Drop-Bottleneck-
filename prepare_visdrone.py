@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 
 
-RAW_ID_TO_CLASS_NAME = {
+RAW_ID_TO_CLASS_NAME_ALL = {
     1: "pedestrian",
     2: "people",
     3: "bicycle",
@@ -18,7 +18,7 @@ RAW_ID_TO_CLASS_NAME = {
     10: "motor",
 }
 
-CLASS_NAMES = [
+CLASS_NAMES_ALL = [
     "pedestrian",
     "people",
     "bicycle",
@@ -30,13 +30,34 @@ CLASS_NAMES = [
     "motor",
 ]
 
-CLASS_NAME_TO_INDEX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
+RAW_ID_TO_CLASS_NAME_VEHICLES = {
+    3: "motorcycle",
+    4: "car",
+    5: "big_car",
+    6: "big_car",
+    7: "motorcycle",
+    8: "motorcycle",
+    9: "big_car",
+    10: "motorcycle",
+}
+
+CLASS_NAMES_VEHICLES = [
+    "car",
+    "big_car",
+    "motorcycle",
+]
+
+CLASS_SETS = {
+    "all": (RAW_ID_TO_CLASS_NAME_ALL, CLASS_NAMES_ALL),
+    "vehicles": (RAW_ID_TO_CLASS_NAME_VEHICLES, CLASS_NAMES_VEHICLES),
+}
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Convert raw VisDrone-DET annotations to YOLO format and merge truck/bus into big_car."
+        description="Convert raw VisDrone-DET annotations to YOLO format."
     )
     parser.add_argument(
         "--train-root",
@@ -52,6 +73,12 @@ def parse_args():
         "--output-root",
         default="datasets/visdrone",
         help="Output directory for YOLO-formatted images/ and labels/.",
+    )
+    parser.add_argument(
+        "--class-set",
+        choices=sorted(CLASS_SETS),
+        default="all",
+        help="'all' keeps the full VisDrone class map. 'vehicles' keeps car, big_car, and motorcycle.",
     )
     parser.add_argument(
         "--copy-images",
@@ -110,7 +137,13 @@ def clamp(value: float) -> float:
     return min(max(value, 0.0), 1.0)
 
 
-def convert_annotation_file(annotation_path: Path, image_path: Path, output_label_path: Path):
+def convert_annotation_file(
+    annotation_path: Path,
+    image_path: Path,
+    output_label_path: Path,
+    raw_id_to_class_name,
+    class_name_to_index,
+):
     width, height = read_image_size(image_path)
     converted_lines = []
 
@@ -129,7 +162,7 @@ def convert_annotation_file(annotation_path: Path, image_path: Path, output_labe
             continue
 
         raw_category = int(category)
-        class_name = RAW_ID_TO_CLASS_NAME.get(raw_category)
+        class_name = raw_id_to_class_name.get(raw_category)
         if class_name is None:
             continue
 
@@ -149,7 +182,7 @@ def convert_annotation_file(annotation_path: Path, image_path: Path, output_labe
         if norm_w == 0.0 or norm_h == 0.0:
             continue
 
-        class_index = CLASS_NAME_TO_INDEX[class_name]
+        class_index = class_name_to_index[class_name]
         converted_lines.append(
             f"{class_index} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}"
         )
@@ -174,7 +207,14 @@ def materialize_image(src_image_path: Path, dst_image_path: Path, copy_images: b
         shutil.copy2(src_image_path, dst_image_path)
 
 
-def convert_split(split_name: str, split_root: Path, output_root: Path, copy_images: bool):
+def convert_split(
+    split_name: str,
+    split_root: Path,
+    output_root: Path,
+    copy_images: bool,
+    raw_id_to_class_name,
+    class_name_to_index,
+):
     images_dir = split_root / "images"
     annotations_dir = split_root / "annotations"
 
@@ -202,7 +242,13 @@ def convert_split(split_name: str, split_root: Path, output_root: Path, copy_ima
         dst_label_path = output_labels_dir / f"{annotation_path.stem}.txt"
 
         materialize_image(image_path, dst_image_path, copy_images)
-        convert_annotation_file(annotation_path, image_path, dst_label_path)
+        convert_annotation_file(
+            annotation_path,
+            image_path,
+            dst_label_path,
+            raw_id_to_class_name,
+            class_name_to_index,
+        )
         converted += 1
 
     print(f"{split_name}: converted {converted} annotation files")
@@ -211,13 +257,32 @@ def convert_split(split_name: str, split_root: Path, output_root: Path, copy_ima
 def main():
     args = parse_args()
     output_root = Path(args.output_root)
+    raw_id_to_class_name, class_names = CLASS_SETS[args.class_set]
+    class_name_to_index = {name: idx for idx, name in enumerate(class_names)}
 
     prepare_output_dirs(output_root, clear_output=args.clear_output)
-    convert_split("train", Path(args.train_root), output_root, copy_images=args.copy_images)
-    convert_split("val", Path(args.val_root), output_root, copy_images=args.copy_images)
+    convert_split(
+        "train",
+        Path(args.train_root),
+        output_root,
+        copy_images=args.copy_images,
+        raw_id_to_class_name=raw_id_to_class_name,
+        class_name_to_index=class_name_to_index,
+    )
+    convert_split(
+        "val",
+        Path(args.val_root),
+        output_root,
+        copy_images=args.copy_images,
+        raw_id_to_class_name=raw_id_to_class_name,
+        class_name_to_index=class_name_to_index,
+    )
 
     print(f"Saved YOLO dataset to: {output_root}")
-    print("Merged classes: truck -> big_car, bus -> big_car")
+    print(f"Class set: {args.class_set}")
+    print("Classes: " + ", ".join(class_names))
+    if "big_car" in class_names:
+        print("Merged classes: van -> big_car, truck -> big_car, bus -> big_car")
 
 
 if __name__ == "__main__":

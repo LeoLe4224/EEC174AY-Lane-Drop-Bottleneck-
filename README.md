@@ -52,6 +52,20 @@ The generated YOLO dataset uses this class list:
 
 Raw VisDrone classes `truck` and `bus` are merged into `big_car` during conversion.
 
+For the highway vehicle-size model, use `configs/visdrone_vehicles.yaml` and:
+
+```bash
+python prepare_visdrone.py --class-set vehicles --output-root datasets/visdrone_vehicles --clear-output
+```
+
+That model uses only:
+
+- `car`: normal sedan/SUV-sized vehicles
+- `big_car`: VisDrone `van`, `truck`, and `bus`
+- `motorcycle`: VisDrone `bicycle`, `tricycle`, `awning-tricycle`, and `motor`
+
+For Google Colab training, open `notebooks/train_visdrone_vehicles_colab.ipynb`.
+
 ## Generated VisDrone layout
 
 Build the training dataset with:

@@ -1,0 +1,8 @@
+path: datasets/visdrone_vehicles
+train: images/train
+val: images/val
+
+names:
+  0: car
+  1: big_car
+  2: motorcycle

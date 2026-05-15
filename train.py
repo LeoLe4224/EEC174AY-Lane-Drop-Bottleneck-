@@ -6,12 +6,12 @@ from ultralytics import YOLO
 
 
 DEFAULT_MODEL = "yolo11s.pt"
-DEFAULT_DATA = "configs/visdrone.yaml"
+DEFAULT_DATA = "configs/visdrone_vehicles.yaml"
 DEFAULT_EPOCHS = 100
 DEFAULT_IMG_SIZE = 1280
 DEFAULT_BATCH = 4
 DEFAULT_PROJECT = "."
-DEFAULT_RUN_NAME = "runs_highway/visdrone_ft"
+DEFAULT_RUN_NAME = "runs_highway/visdrone_vehicles_ft"
 DEFAULT_DEVICE = "0"
 
 
